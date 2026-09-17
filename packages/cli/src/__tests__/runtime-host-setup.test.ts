@@ -233,8 +233,16 @@ test('on-demand setup installs one exact deployment without a service backend', 
   assert.equal(persisted.reconciliation.trigger, 'activation');
 
   const retryOutputs: string[] = [];
-  persisted.launch.nodePath =
-    process.platform === 'win32' ? 'C:\\Program Files\\nodejs\\node.exe' : '/opt/maka/node';
+  // A pinned runtime is now probed before it is retained, so this stands in for an
+  // earlier install's pin with a usable binary reached by a path of its own rather
+  // than one that cannot be executed.
+  const carriedForwardNode = join(base, 'carried-forward-node');
+  if (process.platform === 'win32') {
+    persisted.launch.nodePath = process.execPath;
+  } else {
+    await symlink(process.execPath, carriedForwardNode);
+    persisted.launch.nodePath = carriedForwardNode;
+  }
   await writeFile(
     resolveRuntimeHostManagedDeploymentConfigPath(rootId),
     `${JSON.stringify(persisted)}\n`,
@@ -289,7 +297,7 @@ test('on-demand setup installs one exact deployment without a service backend', 
   assert.equal(
     await runRuntimeHostSetupCli(options, {
       ...overrides,
-      probeNodeRuntimeVersion: async () => '23.7.0',
+      probeNodeRuntime: async () => ({ kind: 'version' as const, version: '23.7.0' }),
       writeOutput: (value) => refusedRuntime.push(value),
     }),
     1,

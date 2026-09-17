@@ -47,7 +47,7 @@ import {
   INTERACTIVE_RUNTIME_HOST_COMPOSITION_ID,
   RUNTIME_HOST_PROTOCOL_VERSION,
 } from '@maka/runtime-host/protocol';
-import { probeNodeRuntimeVersion, unsupportedNodeRuntimeMessage } from './node-runtime-support.js';
+import { probeNodeRuntime, unusableNodeRuntimeMessage } from './node-runtime-support.js';
 import {
   prepareRuntimeHostAccessCredential,
   replaceRuntimeHostAccessCredential,
@@ -184,7 +184,7 @@ interface RuntimeHostSetupDeps {
   readonly resolvePeerNativePath: typeof resolveRuntimeHostNativePath;
   readonly allocateLoopbackPort: typeof allocateRuntimeHostLoopbackPort;
   readonly allocatePeerPort: typeof allocateRuntimeHostPeerPort;
-  readonly probeNodeRuntimeVersion: typeof probeNodeRuntimeVersion;
+  readonly probeNodeRuntime: typeof probeNodeRuntime;
   readonly writeOutput: (value: string) => unknown;
   readonly writeError: (value: string) => unknown;
 }
@@ -269,7 +269,7 @@ export async function runRuntimeHostSetupCli(
     resolvePeerNativePath: resolveRuntimeHostNativePath,
     allocateLoopbackPort: allocateRuntimeHostLoopbackPort,
     allocatePeerPort: allocateRuntimeHostPeerPort,
-    probeNodeRuntimeVersion,
+    probeNodeRuntime,
     writeOutput: (value) => process.stdout.write(value),
     writeError: (value) => process.stderr.write(value),
     ...overrides,
@@ -610,19 +610,16 @@ async function runRuntimeHostSupervisedSetupLocked(
 
 /**
  * A deployment pins one Node binary for the life of the record, and an existing pin is
- * carried forward rather than reselected, so a runtime that cannot load the Host must
- * be refused here instead of producing a deployment that can never start.
+ * carried forward rather than reselected. The lifecycle transaction refuses an unusable
+ * runtime for every writer; failing here keeps setup from resolving a package first.
  */
 async function resolveManagedLaunchNodePath(
   current: RuntimeHostManagedDeploymentConfig | undefined,
-  deps: Pick<RuntimeHostSetupDeps, 'probeNodeRuntimeVersion'>,
+  deps: Pick<RuntimeHostSetupDeps, 'probeNodeRuntime'>,
 ): Promise<string> {
   const nodePath = current?.launch.nodePath ?? process.execPath;
-  const unsupported = unsupportedNodeRuntimeMessage(
-    await deps.probeNodeRuntimeVersion(nodePath),
-    nodePath,
-  );
-  if (unsupported) throw new RuntimeHostSetupError('unsupported_node_runtime', unsupported);
+  const unusable = unusableNodeRuntimeMessage(await deps.probeNodeRuntime(nodePath), nodePath);
+  if (unusable) throw new RuntimeHostSetupError('unsupported_node_runtime', unusable);
   return nodePath;
 }
 

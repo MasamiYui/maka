@@ -18,15 +18,15 @@
  */
 
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import {
   isSupportedNodeRuntimeVersion,
-  probeNodeRuntimeVersion,
+  probeNodeRuntime,
   SUPPORTED_NODE_RUNTIME_RANGE,
-  unsupportedNodeRuntimeMessage,
+  unusableNodeRuntimeMessage,
 } from '../node-runtime-support.js';
 
 test('the supported range excludes Node releases without the zstd bindings', () => {
@@ -43,34 +43,79 @@ test('the running runtime satisfies the range the repository declares', () => {
   assert.equal(SUPPORTED_NODE_RUNTIME_RANGE, '>=22.19.0 <23.0.0 || >=23.8.0');
 });
 
-test('an unsupported runtime is named together with the binary it was read from', () => {
-  const message = unsupportedNodeRuntimeMessage('23.7.0', '/opt/node-23.7.0/bin/node');
+test('an unsupported version is named together with the binary it was read from', () => {
+  const message = unusableNodeRuntimeMessage(
+    { kind: 'version', version: '23.7.0' },
+    '/opt/node-23.7.0/bin/node',
+  );
   assert.ok(message);
   assert.match(message, /23\.7\.0/u);
   assert.match(message, /\/opt\/node-23\.7\.0\/bin\/node/u);
   assert.match(message, />=22\.19\.0 <23\.0\.0 \|\| >=23\.8\.0/u);
-  assert.equal(unsupportedNodeRuntimeMessage('23.7.0'), unsupportedNodeRuntimeMessage('23.7.0'));
-  assert.doesNotMatch(unsupportedNodeRuntimeMessage('23.7.0') ?? '', /undefined/u);
+  assert.equal(
+    unusableNodeRuntimeMessage({ kind: 'version', version: process.versions.node }),
+    undefined,
+  );
 });
 
-test('missing or unrecognized version evidence never blocks a runtime', () => {
-  assert.equal(unsupportedNodeRuntimeMessage(undefined), undefined);
-  assert.equal(unsupportedNodeRuntimeMessage(''), undefined);
-  assert.equal(unsupportedNodeRuntimeMessage('not-a-version'), undefined);
-  assert.equal(unsupportedNodeRuntimeMessage(process.versions.node), undefined);
+test('a runtime that cannot be executed is unusable, not unknown', () => {
+  const message = unusableNodeRuntimeMessage(
+    { kind: 'unusable', detail: 'the pinned binary does not exist' },
+    '/opt/maka/node',
+  );
+  assert.ok(message);
+  assert.match(message, /\/opt\/maka\/node/u);
+  assert.match(message, /does not exist/u);
+});
+
+test('only a probe that could not answer leaves the runtime unjudged', () => {
+  assert.equal(
+    unusableNodeRuntimeMessage({ kind: 'unknown', detail: 'the runtime did not answer' }),
+    undefined,
+  );
 });
 
 test('probing this process reports its own version without launching it', async () => {
-  assert.equal(await probeNodeRuntimeVersion(process.execPath), process.versions.node);
+  assert.deepEqual(await probeNodeRuntime(process.execPath), {
+    kind: 'version',
+    version: process.versions.node,
+  });
 });
 
-test('probing a runtime that cannot answer reports no evidence', async (t) => {
+test('each way a pinned binary can fail is classified as unusable', async (t) => {
   const base = await mkdtemp(join(tmpdir(), 'maka-node-runtime-probe-'));
   t.after(async () => {
     await rm(base, { recursive: true, force: true });
   });
-  const notExecutable = join(base, 'node');
+
+  const absent = await probeNodeRuntime(join(base, 'absent'));
+  assert.equal(absent.kind, 'unusable');
+  assert.match(absent.kind === 'unusable' ? absent.detail : '', /does not exist/u);
+
+  const notExecutable = join(base, 'not-executable');
   await writeFile(notExecutable, 'not a runtime\n');
-  assert.equal(await probeNodeRuntimeVersion(notExecutable), undefined);
-  assert.equal(await probeNodeRuntimeVersion(join(base, 'absent')), undefined);
+  await chmod(notExecutable, 0o644);
+  assert.equal((await probeNodeRuntime(notExecutable)).kind, 'unusable');
+
+  if (process.platform !== 'win32') {
+    const failing = join(base, 'failing');
+    await writeFile(failing, '#!/bin/sh\nexit 3\n');
+    await chmod(failing, 0o755);
+    assert.equal((await probeNodeRuntime(failing)).kind, 'unusable');
+
+    const chatty = join(base, 'chatty');
+    await writeFile(chatty, '#!/bin/sh\necho not-a-version\n');
+    await chmod(chatty, 0o755);
+    const malformed = await probeNodeRuntime(chatty);
+    assert.equal(malformed.kind, 'unusable');
+    assert.match(malformed.kind === 'unusable' ? malformed.detail : '', /did not report/u);
+
+    const supported = join(base, 'supported');
+    await writeFile(supported, '#!/bin/sh\necho 24.21.0\n');
+    await chmod(supported, 0o755);
+    assert.deepEqual(await probeNodeRuntime(supported), {
+      kind: 'version',
+      version: '24.21.0',
+    });
+  }
 });
