@@ -47,7 +47,7 @@ import {
   INTERACTIVE_RUNTIME_HOST_COMPOSITION_ID,
   RUNTIME_HOST_PROTOCOL_VERSION,
 } from '@maka/runtime-host/protocol';
-import { probeNodeRuntime, unusableNodeRuntimeMessage } from './node-runtime-support.js';
+import { nodeRuntimeRefusal, probeNodeRuntime } from './node-runtime-support.js';
 import {
   prepareRuntimeHostAccessCredential,
   replaceRuntimeHostAccessCredential,
@@ -618,8 +618,13 @@ async function resolveManagedLaunchNodePath(
   deps: Pick<RuntimeHostSetupDeps, 'probeNodeRuntime'>,
 ): Promise<string> {
   const nodePath = current?.launch.nodePath ?? process.execPath;
-  const unusable = unusableNodeRuntimeMessage(await deps.probeNodeRuntime(nodePath), nodePath);
-  if (unusable) throw new RuntimeHostSetupError('unsupported_node_runtime', unusable);
+  const refused = nodeRuntimeRefusal(await deps.probeNodeRuntime(nodePath), nodePath);
+  if (refused) {
+    throw new RuntimeHostSetupError(
+      refused.kind === 'unverified' ? 'node_runtime_unverified' : 'unsupported_node_runtime',
+      refused.message,
+    );
+  }
   return nodePath;
 }
 

@@ -32,18 +32,34 @@ export const SUPPORTED_NODE_RUNTIME_RANGE = '>=22.19.0 <23.0.0 || >=23.8.0';
 
 const NODE_RUNTIME_PROBE_TIMEOUT_MS = 10_000;
 
+/** A single slow spawn must not decide a runtime, so a timed out probe is retried. */
+const NODE_RUNTIME_PROBE_ATTEMPTS = 2;
+
 const NODE_RUNTIME_VERSION_PATTERN = /^v?(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]*)?$/u;
 
 /**
  * A deployment launches its pinned binary directly, so a runtime that cannot be
- * executed or that answers unintelligibly is unusable rather than unknown. Only
- * evidence the probe could not obtain — a timed out spawn on a loaded machine —
- * leaves the runtime unjudged.
+ * executed or that answers unintelligibly is unusable. A probe that never answered
+ * establishes nothing either way and leaves the runtime unverified.
  */
 export type NodeRuntimeProbe =
   | { readonly kind: 'version'; readonly version: string }
   | { readonly kind: 'unusable'; readonly detail: string }
   | { readonly kind: 'unknown'; readonly detail: string };
+
+/**
+ * Why a runtime may not be pinned. `unverified` is not a verdict on the runtime: the
+ * probe failed to reach one, and the caller should retry rather than reinstall.
+ */
+export interface NodeRuntimeRefusal {
+  readonly kind: 'unusable' | 'unverified';
+  readonly message: string;
+}
+
+export interface NodeRuntimeProbeOptions {
+  readonly timeoutMs?: number;
+  readonly attempts?: number;
+}
 
 export function isSupportedNodeRuntimeVersion(version: string): boolean {
   const parsed = NODE_RUNTIME_VERSION_PATTERN.exec(version.trim());
@@ -56,36 +72,70 @@ export function isSupportedNodeRuntimeVersion(version: string): boolean {
   return false;
 }
 
-/** Describes why a probed runtime cannot be pinned, or nothing when it may be. */
-export function unusableNodeRuntimeMessage(
+/**
+ * Describes why a probed runtime may not be pinned, or nothing when it may be.
+ *
+ * Replacement retires the current owner and commits the successor before activation,
+ * and an on-demand update deliberately retains that successor when activation fails.
+ * Proceeding on a runtime nothing could verify can therefore make an unusable pin
+ * authoritative with no way back, so an unverified runtime is refused as well.
+ */
+export function nodeRuntimeRefusal(
   probe: NodeRuntimeProbe,
   nodePath?: string,
-): string | undefined {
+): NodeRuntimeRefusal | undefined {
   const where = nodePath ? ` (${nodePath})` : '';
-  if (probe.kind === 'unknown') return undefined;
+  if (probe.kind === 'unknown') {
+    return {
+      kind: 'unverified',
+      message: `The managed Runtime Host could not verify the selected Node.js runtime${where}: ${probe.detail}. Retry once the machine is responsive.`,
+    };
+  }
   if (probe.kind === 'unusable') {
-    return `The managed Runtime Host cannot use the selected Node.js runtime${where}: ${probe.detail}.`;
+    return {
+      kind: 'unusable',
+      message: `The managed Runtime Host cannot use the selected Node.js runtime${where}: ${probe.detail}.`,
+    };
   }
   if (isSupportedNodeRuntimeVersion(probe.version)) return undefined;
-  return `The managed Runtime Host cannot run on Node.js ${probe.version}${where}; install Node.js ${SUPPORTED_NODE_RUNTIME_RANGE} and retry.`;
+  return {
+    kind: 'unusable',
+    message: `The managed Runtime Host cannot run on Node.js ${probe.version}${where}; install Node.js ${SUPPORTED_NODE_RUNTIME_RANGE} and retry.`,
+  };
 }
 
 /**
  * Reports what a Node binary says it is. A deployment carries a pinned path forward
  * from an earlier install, so only the binary's own answer is authoritative.
  */
-export async function probeNodeRuntime(nodePath: string): Promise<NodeRuntimeProbe> {
-  // A record that names no runtime cannot be probed. Deciding that is the decoded
-  // config's job at the lifecycle boundary, so an early caller learns nothing here.
+export async function probeNodeRuntime(
+  nodePath: string,
+  options: NodeRuntimeProbeOptions = {},
+): Promise<NodeRuntimeProbe> {
   if (typeof nodePath !== 'string' || nodePath.trim() === '') {
     return { kind: 'unknown', detail: 'the deployment names no runtime to probe' };
   }
   if (resolve(nodePath) === resolve(process.execPath)) {
     return { kind: 'version', version: process.versions.node };
   }
+  const timeoutMs = options.timeoutMs ?? NODE_RUNTIME_PROBE_TIMEOUT_MS;
+  const attempts = Math.max(1, options.attempts ?? NODE_RUNTIME_PROBE_ATTEMPTS);
+  let unanswered: NodeRuntimeProbe = {
+    kind: 'unknown',
+    detail: 'the runtime did not answer before the probe deadline',
+  };
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const probe = await runNodeRuntimeProbe(nodePath, timeoutMs);
+    if (probe.kind !== 'unknown') return probe;
+    unanswered = probe;
+  }
+  return unanswered;
+}
+
+async function runNodeRuntimeProbe(nodePath: string, timeoutMs: number): Promise<NodeRuntimeProbe> {
   try {
     const { stdout } = await execFileAsync(nodePath, ['-p', 'process.versions.node'], {
-      timeout: NODE_RUNTIME_PROBE_TIMEOUT_MS,
+      timeout: timeoutMs,
       windowsHide: true,
     });
     const version = stdout.trim();
@@ -93,7 +143,7 @@ export async function probeNodeRuntime(nodePath: string): Promise<NodeRuntimePro
       ? { kind: 'version', version }
       : { kind: 'unusable', detail: 'it did not report a Node.js version' };
   } catch (error) {
-    // A killed probe is this timeout, not the runtime refusing to run.
+    // A killed probe is this deadline, not the runtime refusing to run.
     if (isTimedOutProbe(error)) {
       return { kind: 'unknown', detail: 'the runtime did not answer before the probe deadline' };
     }

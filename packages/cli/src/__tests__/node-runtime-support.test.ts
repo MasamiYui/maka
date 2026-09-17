@@ -18,15 +18,15 @@
  */
 
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import {
   isSupportedNodeRuntimeVersion,
+  nodeRuntimeRefusal,
   probeNodeRuntime,
   SUPPORTED_NODE_RUNTIME_RANGE,
-  unusableNodeRuntimeMessage,
 } from '../node-runtime-support.js';
 
 test('the supported range excludes Node releases without the zstd bindings', () => {
@@ -44,35 +44,37 @@ test('the running runtime satisfies the range the repository declares', () => {
 });
 
 test('an unsupported version is named together with the binary it was read from', () => {
-  const message = unusableNodeRuntimeMessage(
+  const refusal = nodeRuntimeRefusal(
     { kind: 'version', version: '23.7.0' },
     '/opt/node-23.7.0/bin/node',
   );
-  assert.ok(message);
-  assert.match(message, /23\.7\.0/u);
-  assert.match(message, /\/opt\/node-23\.7\.0\/bin\/node/u);
-  assert.match(message, />=22\.19\.0 <23\.0\.0 \|\| >=23\.8\.0/u);
-  assert.equal(
-    unusableNodeRuntimeMessage({ kind: 'version', version: process.versions.node }),
-    undefined,
-  );
+  assert.equal(refusal?.kind, 'unusable');
+  assert.match(refusal?.message ?? '', /23\.7\.0/u);
+  assert.match(refusal?.message ?? '', /\/opt\/node-23\.7\.0\/bin\/node/u);
+  assert.match(refusal?.message ?? '', />=22\.19\.0 <23\.0\.0 \|\| >=23\.8\.0/u);
+  assert.equal(nodeRuntimeRefusal({ kind: 'version', version: process.versions.node }), undefined);
 });
 
-test('a runtime that cannot be executed is unusable, not unknown', () => {
-  const message = unusableNodeRuntimeMessage(
+test('a runtime that cannot be executed is unusable', () => {
+  const refusal = nodeRuntimeRefusal(
     { kind: 'unusable', detail: 'the pinned binary does not exist' },
     '/opt/maka/node',
   );
-  assert.ok(message);
-  assert.match(message, /\/opt\/maka\/node/u);
-  assert.match(message, /does not exist/u);
+  assert.equal(refusal?.kind, 'unusable');
+  assert.match(refusal?.message ?? '', /\/opt\/maka\/node/u);
+  assert.match(refusal?.message ?? '', /does not exist/u);
 });
 
-test('only a probe that could not answer leaves the runtime unjudged', () => {
-  assert.equal(
-    unusableNodeRuntimeMessage({ kind: 'unknown', detail: 'the runtime did not answer' }),
-    undefined,
+test('a runtime nothing could verify is refused as unverified, not as a verdict', () => {
+  const refusal = nodeRuntimeRefusal(
+    { kind: 'unknown', detail: 'the runtime did not answer before the probe deadline' },
+    '/opt/slow/node',
   );
+  assert.equal(refusal?.kind, 'unverified');
+  assert.match(refusal?.message ?? '', /could not verify/u);
+  assert.match(refusal?.message ?? '', /Retry/u);
+  // The remedy is a retry, never a reinstall: this says nothing about the version.
+  assert.doesNotMatch(refusal?.message ?? '', />=22\.19\.0/u);
 });
 
 test('probing this process reports its own version without launching it', async () => {
@@ -117,5 +119,36 @@ test('each way a pinned binary can fail is classified as unusable', async (t) =>
       kind: 'version',
       version: '24.21.0',
     });
+  }
+});
+
+test('a timed out probe is retried before the runtime is left unverified', async (t) => {
+  if (process.platform !== 'win32') {
+    const base = await mkdtemp(join(tmpdir(), 'maka-node-runtime-timeout-'));
+    t.after(async () => {
+      await rm(base, { recursive: true, force: true });
+    });
+
+    const stalling = join(base, 'stalling');
+    await writeFile(stalling, '#!/bin/sh\nsleep 3\necho 24.21.0\n');
+    await chmod(stalling, 0o755);
+    const unanswered = await probeNodeRuntime(stalling, { timeoutMs: 400, attempts: 2 });
+    assert.equal(unanswered.kind, 'unknown');
+    assert.equal(nodeRuntimeRefusal(unanswered, stalling)?.kind, 'unverified');
+
+    // A runtime that is merely slow to start once still answers on the retry, so a
+    // single stalled spawn never decides the deployment.
+    const counter = join(base, 'slow-once-count');
+    const slowOnce = join(base, 'slow-once');
+    await writeFile(
+      slowOnce,
+      `#!/bin/sh\ncount=$(cat ${counter} 2>/dev/null || echo 0)\ncount=$((count+1))\necho $count > ${counter}\nif [ "$count" -lt 2 ]; then sleep 3; fi\necho 24.21.0\n`,
+    );
+    await chmod(slowOnce, 0o755);
+    assert.deepEqual(await probeNodeRuntime(slowOnce, { timeoutMs: 1_500, attempts: 2 }), {
+      kind: 'version',
+      version: '24.21.0',
+    });
+    assert.equal((await readFile(counter, 'utf8')).trim(), '2');
   }
 });

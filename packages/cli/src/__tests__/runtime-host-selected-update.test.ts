@@ -55,6 +55,7 @@ describe('managed Runtime Host selected update', () => {
       root: { id: TARGET.rootId, path: TARGET.rootPath },
       lifecycle: { mode: 'supervised', provider: 'test' },
       launch: {
+        nodePath: process.execPath,
         package: { kind: 'npm_registry', version: '2.0.0', integrity: INTEGRITY },
       },
     };

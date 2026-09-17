@@ -526,34 +526,27 @@ test('a carried-forward runtime that cannot run the Host is refused before retir
     );
   }
 
-  // A probe that could not answer is not evidence against the runtime, so the
-  // transaction proceeds and fails on its own terms instead.
-  let resolvedProvider = false;
+  // Retirement below is destructive and an on-demand update keeps its successor when
+  // activation fails, so a runtime nothing could verify must not become authoritative.
   await assert.rejects(
     replaceRuntimeHostLifecycle({
       operation: 'update',
       current,
       desired,
-      deps: {
-        convergeOperator: async () => undefined,
-        verifyOperator: async () => undefined,
-        resolveProvider: () => {
-          resolvedProvider = true;
-          throw new Error('Injected provider failure');
-        },
-        probeNodeRuntime: async () => ({
-          kind: 'unknown',
-          detail: 'the runtime did not answer before the probe deadline',
-        }),
-      },
+      deps: refusingDeps(async () => ({
+        kind: 'unknown',
+        detail: 'the runtime did not answer before the probe deadline',
+      })),
     }),
     (error: unknown) =>
-      !(
-        error instanceof RuntimeHostLifecycleTransactionError &&
-        error.code === 'unsupported_node_runtime'
-      ),
+      error instanceof RuntimeHostLifecycleTransactionError &&
+      error.code === 'node_runtime_unverified' &&
+      /could not verify/u.test(error.message),
   );
-  assert.equal(resolvedProvider, true);
+  assert.deepEqual(
+    (await readRuntimeHostManagedDeploymentAuthorityRecord(capability)) ?? undefined,
+    current,
+  );
 });
 
 test('failed on-demand candidate activation retains the successor authority', async (t) => {

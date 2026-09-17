@@ -90,7 +90,7 @@ import {
   verifyRuntimeHostLifecycleProjection,
   type RuntimeHostLifecycleTransactionDeps,
 } from './runtime-host-lifecycle-transaction.js';
-import { probeNodeRuntime, unusableNodeRuntimeMessage } from './node-runtime-support.js';
+import { nodeRuntimeRefusal, probeNodeRuntime } from './node-runtime-support.js';
 import { launchRuntimeHostLocalSourceRetirement } from './runtime-host-local-source-retirement.js';
 import { manageRuntimeHostManagedLifecycle } from './runtime-host-managed-lifecycle-manager.js';
 
@@ -777,12 +777,17 @@ async function runCanonicalRuntimeHostUpdate(
         // An update carries the pinned runtime forward untouched, so a deployment that
         // was pinned to an unusable one stays unusable. The lifecycle transaction
         // refuses it too; failing first keeps a package from being staged for nothing.
-        const unusableRuntime = unusableNodeRuntimeMessage(
+        const refusedRuntime = nodeRuntimeRefusal(
           await (lifecycleDeps.probeNodeRuntime ?? probeNodeRuntime)(current.launch.nodePath),
           current.launch.nodePath,
         );
-        if (unusableRuntime) {
-          throw new RuntimeHostServiceManagerError('invalid_launch', unusableRuntime);
+        if (refusedRuntime) {
+          throw new RuntimeHostServiceManagerError(
+            refusedRuntime.kind === 'unverified'
+              ? 'service_manager_operation_failed'
+              : 'invalid_launch',
+            refusedRuntime.message,
+          );
         }
         if (updateOperation === 'update') {
           emit(progress('staging', current.launch.package.version, options.version));
