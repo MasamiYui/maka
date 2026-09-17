@@ -283,6 +283,33 @@ test('on-demand setup installs one exact deployment without a service backend', 
     'unsupported_lifecycle_configuration',
   );
 
+  // A pinned runtime that cannot load the Host is refused before it reaches the
+  // record, including the pin an earlier install carried forward.
+  const refusedRuntime: string[] = [];
+  assert.equal(
+    await runRuntimeHostSetupCli(options, {
+      ...overrides,
+      probeNodeRuntimeVersion: async () => '23.7.0',
+      writeOutput: (value) => refusedRuntime.push(value),
+    }),
+    1,
+  );
+  const unsupportedRuntime = refusedRuntime
+    .map(decodeRuntimeHostSetupFrame)
+    .find((frame) => frame?.kind === 'error');
+  assert.equal(
+    unsupportedRuntime?.kind === 'error' ? unsupportedRuntime.error.code : undefined,
+    'unsupported_node_runtime',
+  );
+  assert.match(
+    unsupportedRuntime?.kind === 'error' ? unsupportedRuntime.error.message : '',
+    /23\.7\.0/u,
+  );
+  assert.deepEqual(
+    JSON.parse(await readFile(resolveRuntimeHostManagedDeploymentConfigPath(rootId), 'utf8')),
+    persisted,
+  );
+
   // Discovery reuses canonical identity even when a newer/older Desktop selects
   // another package, and never opens storage, activates, pairs, or changes settings.
   const discoveryOwner = await tryAcquireStateRootOwner(
